@@ -135,17 +135,35 @@ Key ones (see [`internal/config`](internal/config/config.go) for all):
 | `SPANGEN_DURATION` / `-duration` | `0` | stop after this long (`0` = until signalled) |
 | `SPANGEN_MAX_SPANS` / `-max-spans` | `0` | stop after N spans |
 | `SPANGEN_WORKERS` / `-workers` | `0` | generator goroutines (`0`=GOMAXPROCS) |
-| `SPANGEN_CH_ENDPOINTS` | `localhost:9000` | comma-separated `host:9000` |
+| `SPANGEN_CH_ENDPOINTS` | `localhost:9000` | comma-separated `host:port` (native `:9000`, http `:8123`) |
+| `SPANGEN_CH_PROTOCOL` | `native` | `native` (TCP 9000) / `http` (8123) |
 | `SPANGEN_CH_MODE` | `local` | `local` / `distributed` / `shard-roundrobin` |
 | `SPANGEN_CH_TABLE` | `otel_traces` | target table (see table above) |
 | `SPANGEN_CH_ASYNC` | `true` | `async_insert=1` |
 | `SPANGEN_CH_WAIT_FOR_ASYNC` | `true` | `wait_for_async_insert` (1/0) |
 | `SPANGEN_CH_BATCH_SIZE` | `5000` | rows per insert |
-| `SPANGEN_CH_COMPRESSION` | `lz4` | `none` / `lz4` / `zstd` |
+| `SPANGEN_CH_COMPRESSION` | `lz4` | `none` / `lz4` / `zstd` / `gzip` (gzip = http only) |
+| `SPANGEN_CH_TLS` | `false` | TLS (native `:9440`, https `:8443`) |
 | `SPANGEN_OTLP_ENDPOINT` | `localhost:4317` | collector OTLP/gRPC |
 | `SPANGEN_OTLP_CONNECTIONS` | `4` | gRPC connections (concurrency) |
 | `SPANGEN_OTLP_SPANS_PER_REQUEST` | `2000` | spans/request (keep < 4MB) |
 | `SPANGEN_METRICS_ADDR` | `:8888` | Prometheus endpoint |
+
+### ClickHouse protocol: native vs HTTP
+
+`SPANGEN_CH_PROTOCOL=native` (default) uses the binary **native protocol** on TCP
+`:9000` (`:9440` TLS) — lowest overhead, best for max ingest. Set
+`SPANGEN_CH_PROTOCOL=http` to insert over the **HTTP interface** on `:8123`
+(`:8443` TLS) — useful when only the HTTP port is exposed (ingress/LB/proxy) or
+when you want to benchmark that path. The same batch `INSERT` (`Map`/`Nested`
+columns, `async_insert`, all three topology modes) works over both; just point
+`SPANGEN_CH_ENDPOINTS` at the matching port. `gzip` compression is available on
+HTTP; `lz4`/`zstd` work on both.
+
+```bash
+# HTTP example
+SPANGEN_CH_PROTOCOL=http SPANGEN_CH_ENDPOINTS=clickhouse:8123 SPANGEN_CH_COMPRESSION=gzip ...
+```
 
 ### `async_insert` (you asked to use it)
 

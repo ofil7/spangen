@@ -29,6 +29,7 @@ generator:
 # ---- direct ClickHouse sink ----
 clickhouse:
   endpoints: "ch-shard-0:9000,ch-shard-1:9000,ch-shard-2:9000"
+  protocol: native              # native (TCP 9000) | http (8123). Match the port in endpoints.
   mode: shard-roundrobin        # local | distributed | shard-roundrobin
   database: otel
   table: otel_traces_local      # use "otel_traces" with mode=distributed

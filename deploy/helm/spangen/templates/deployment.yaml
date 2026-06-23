@@ -68,6 +68,8 @@ spec:
             # ----- clickhouse sink -----
             - name: SPANGEN_CH_ENDPOINTS
               value: {{ .Values.clickhouse.endpoints | quote }}
+            - name: SPANGEN_CH_PROTOCOL
+              value: {{ .Values.clickhouse.protocol | quote }}
             - name: SPANGEN_CH_MODE
               value: {{ .Values.clickhouse.mode | quote }}
             - name: SPANGEN_CH_DATABASE

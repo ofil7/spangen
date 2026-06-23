@@ -50,9 +50,10 @@ type GenConfig struct {
 
 // CHConfig controls the direct ClickHouse native sink.
 type CHConfig struct {
-	Endpoints    []string // host:9000 list
+	Endpoints    []string // host:port list (9000 native / 8123 http, or TLS 9440 / 8443)
 	Database     string
 	Table        string
+	Protocol     string // "native" (TCP 9000) | "http" (8123)
 	Mode         string // "local" | "distributed" | "shard-roundrobin"
 	Username     string
 	Password     string
@@ -108,9 +109,10 @@ func Parse() (*Config, error) {
 
 	// ClickHouse
 	var chEndpoints string
-	flag.StringVar(&chEndpoints, "ch.endpoints", env("SPANGEN_CH_ENDPOINTS", "localhost:9000"), "comma-separated host:9000 list")
+	flag.StringVar(&chEndpoints, "ch.endpoints", env("SPANGEN_CH_ENDPOINTS", "localhost:9000"), "comma-separated host:port list (native 9000 / http 8123)")
 	flag.StringVar(&c.CH.Database, "ch.database", env("SPANGEN_CH_DATABASE", "otel"), "ClickHouse database")
 	flag.StringVar(&c.CH.Table, "ch.table", env("SPANGEN_CH_TABLE", "otel_traces"), "target table")
+	flag.StringVar(&c.CH.Protocol, "ch.protocol", env("SPANGEN_CH_PROTOCOL", "native"), "native|http (native=TCP 9000, http=8123)")
 	flag.StringVar(&c.CH.Mode, "ch.mode", env("SPANGEN_CH_MODE", "local"), "local|distributed|shard-roundrobin")
 	flag.StringVar(&c.CH.Username, "ch.username", env("SPANGEN_CH_USERNAME", "default"), "username")
 	flag.StringVar(&c.CH.Password, "ch.password", env("SPANGEN_CH_PASSWORD", ""), "password")
@@ -155,6 +157,11 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid -sink %q (want clickhouse|otlp)", c.Sink)
 	}
 	if c.Sink == "clickhouse" {
+		switch c.CH.Protocol {
+		case "native", "http":
+		default:
+			return fmt.Errorf("invalid -ch.protocol %q (want native|http)", c.CH.Protocol)
+		}
 		switch c.CH.Mode {
 		case "local", "distributed", "shard-roundrobin":
 		default:
@@ -164,9 +171,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("-ch.endpoints is empty")
 		}
 		switch c.CH.Compression {
-		case "none", "lz4", "zstd":
+		case "none", "lz4", "zstd", "gzip":
 		default:
-			return fmt.Errorf("invalid -ch.compression %q", c.CH.Compression)
+			return fmt.Errorf("invalid -ch.compression %q (want none|lz4|zstd|gzip)", c.CH.Compression)
+		}
+		if c.CH.Compression == "gzip" && c.CH.Protocol != "http" {
+			return fmt.Errorf("-ch.compression=gzip is only valid with -ch.protocol=http")
 		}
 	}
 	if c.Sink == "otlp" && c.OTLP.Endpoint == "" {

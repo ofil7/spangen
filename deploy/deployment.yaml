@@ -36,6 +36,7 @@ spec:
             - { name: SPANGEN_WORKERS, value: "0" }             # 0 = GOMAXPROCS
             # ----- ClickHouse (direct) -----
             - { name: SPANGEN_CH_ENDPOINTS, value: "ch-shard-0:9000,ch-shard-1:9000,ch-shard-2:9000" }
+            - { name: SPANGEN_CH_PROTOCOL,  value: "native" }            # native (9000) | http (8123)
             - { name: SPANGEN_CH_MODE,      value: "shard-roundrobin" }  # local|distributed|shard-roundrobin
             - { name: SPANGEN_CH_DATABASE,  value: "otel" }
             - { name: SPANGEN_CH_TABLE,     value: "otel_traces_local" } # otel_traces for distributed mode

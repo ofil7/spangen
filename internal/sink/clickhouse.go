@@ -43,6 +43,7 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 				Username: ch.Username,
 				Password: ch.Password,
 			},
+			Protocol:        chProtocol(ch.Protocol),
 			DialTimeout:     ch.DialTimeout,
 			MaxOpenConns:    ch.MaxOpenConns,
 			MaxIdleConns:    ch.MaxOpenConns,
@@ -266,13 +267,23 @@ func buildSettings(ch config.CHConfig) clickhouse.Settings {
 	return st
 }
 
+// chProtocol selects the wire protocol. native = TCP (9000); http = 8123.
+func chProtocol(p string) clickhouse.Protocol {
+	if p == "http" {
+		return clickhouse.HTTP
+	}
+	return clickhouse.Native
+}
+
 func buildCompression(method string) *clickhouse.Compression {
 	switch method {
 	case "zstd":
 		return &clickhouse.Compression{Method: clickhouse.CompressionZSTD}
+	case "gzip": // HTTP only
+		return &clickhouse.Compression{Method: clickhouse.CompressionGZIP}
 	case "none":
 		return &clickhouse.Compression{Method: clickhouse.CompressionNone}
-	default: // lz4
+	default: // lz4 (valid on both native and http)
 		return &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
 	}
 }
