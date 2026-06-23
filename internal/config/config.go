@@ -5,6 +5,8 @@
 package config
 
 import (
+	crand "crypto/rand"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"os"
@@ -17,8 +19,9 @@ import (
 // Config is the fully-resolved runtime configuration.
 type Config struct {
 	Sink         string // "clickhouse" | "otlp"
-	ReplicaIndex int    // pod ordinal; offsets RNG seed and shard rotation
-	Seed         uint64 // base PRNG seed (combined with ReplicaIndex)
+	ReplicaIndex int    // pod ordinal; offsets shard rotation
+	Seed         uint64 // base PRNG seed for the (shared) topology
+	HostID       uint64 // strong per-pod hash; salts worker seeds so ID streams never collide
 
 	Metrics MetricsConfig
 	Gen     GenConfig
@@ -137,6 +140,7 @@ func Parse() (*Config, error) {
 
 	c.CH.Endpoints = splitCSV(chEndpoints)
 	c.OTLP.Headers = parseKV(otlpHeaders)
+	c.HostID = hostID()
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -284,4 +288,29 @@ func detectReplicaIndex() int {
 		hsh *= 16777619
 	}
 	return int(hsh % 1024)
+}
+
+// hostID returns a strong 64-bit identifier unique to this pod. Pod names are
+// unique in Kubernetes, so an FNV-1a-64 hash of the hostname gives every replica
+// a distinct value used to salt worker RNG seeds — guaranteeing no two pods ever
+// emit the same TraceId/SpanId stream (even when their replica index collides).
+// If the hostname is unavailable, fall back to a random value.
+func hostID() uint64 {
+	h, _ := os.Hostname()
+	if h == "" {
+		h = env("HOSTNAME", "")
+	}
+	if h == "" {
+		var b [8]byte
+		if _, err := crand.Read(b[:]); err == nil {
+			return binary.LittleEndian.Uint64(b[:])
+		}
+		return uint64(time.Now().UnixNano())
+	}
+	var hsh uint64 = 1469598103934665603 // FNV-1a-64 offset basis
+	for i := 0; i < len(h); i++ {
+		hsh ^= uint64(h[i])
+		hsh *= 1099511628211 // FNV-1a-64 prime
+	}
+	return hsh
 }

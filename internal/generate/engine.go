@@ -81,7 +81,7 @@ func (e *Engine) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		seed := seedFor(e.cfg.Seed, e.cfg.ReplicaIndex, w)
+		seed := seedFor(e.cfg.Seed, e.cfg.HostID, w)
 		go func(seed uint64) {
 			defer wg.Done()
 			e.worker(runCtx, cancel, seed)
@@ -127,6 +127,11 @@ func (e *Engine) worker(ctx context.Context, cancel context.CancelFunc, seed uin
 			}
 		}
 
+		// Don't send on an already-cancelled context (shutdown, or max-spans hit
+		// in unbounded mode) — it would just be recorded as a spurious drop.
+		if ctx.Err() != nil {
+			return
+		}
 		e.send(ctx, td, n)
 	}
 }
@@ -235,6 +240,11 @@ func (e *Engine) logStatus(ctx context.Context) {
 	}
 }
 
-func seedFor(base uint64, replica, worker int) uint64 {
-	return base + uint64(replica)*1000003 + uint64(worker)*2654435761
+// seedFor derives a unique PRNG seed per (pod, worker). The host salt makes the
+// stream unique across pods even if their replica index collides; the worker
+// term separates goroutines within a pod. The topology (catalog) deliberately
+// does NOT use this — it uses the bare base seed so all pods model the same
+// services.
+func seedFor(base, host uint64, worker int) uint64 {
+	return base ^ host ^ (uint64(worker+1) * 2654435761)
 }
