@@ -1,0 +1,19 @@
+# Drive a sharded cluster through the Distributed table.
+# helm install bench ./spangen -f examples/values-clickhouse-distributed.yaml
+sink: clickhouse
+replicaCount: 10
+generator:
+  rate: 100000
+  ramp: 1m
+clickhouse:
+  endpoints: "ch.svc.cluster.local:9000"   # any node(s); Distributed fans out
+  mode: distributed
+  database: otel
+  table: otel_traces                        # the Distributed table
+  existingSecret: spangen-ch-creds          # pre-created Secret with key 'password'
+  async: true
+  waitForAsync: true
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus

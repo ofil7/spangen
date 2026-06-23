@@ -1,0 +1,17 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spangen.fullname" . }}
+  labels:
+    {{- include "spangen.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "spangen.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

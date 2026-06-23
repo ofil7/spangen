@@ -1,0 +1,90 @@
+# Reference OpenShift/Kubernetes manifest for the 1M spans/s benchmark:
+# 10 replicas x 100k spans/s. Adjust the image registry, endpoints, and
+# resources for your cluster. This is a starting point — tune to taste.
+#
+# Notes:
+# - securityContext is OpenShift `restricted-v2` SCC friendly: no fixed UID
+#   (the SCC injects one), non-root, no privilege escalation, all caps dropped.
+# - Each pod auto-derives a replica index from its hostname to offset shard
+#   rotation and RNG seed (see SPANGEN_REPLICA_INDEX to override).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spangen
+  labels: { app: spangen }
+spec:
+  replicas: 10
+  selector:
+    matchLabels: { app: spangen }
+  template:
+    metadata:
+      labels: { app: spangen }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: spangen
+          image: image-registry.internal/benchmark/spangen:latest
+          imagePullPolicy: IfNotPresent
+          args: []  # all config via env below; flags also work
+          env:
+            # ----- target & rate -----
+            - { name: SPANGEN_SINK,  value: "clickhouse" }      # or "otlp"
+            - { name: SPANGEN_RATE,  value: "100000" }          # spans/s per pod
+            - { name: SPANGEN_RAMP,  value: "30s" }
+            - { name: SPANGEN_WORKERS, value: "0" }             # 0 = GOMAXPROCS
+            # ----- ClickHouse (direct) -----
+            - { name: SPANGEN_CH_ENDPOINTS, value: "ch-shard-0:9000,ch-shard-1:9000,ch-shard-2:9000" }
+            - { name: SPANGEN_CH_MODE,      value: "shard-roundrobin" }  # local|distributed|shard-roundrobin
+            - { name: SPANGEN_CH_DATABASE,  value: "otel" }
+            - { name: SPANGEN_CH_TABLE,     value: "otel_traces_local" } # otel_traces for distributed mode
+            - { name: SPANGEN_CH_USERNAME,  value: "default" }
+            - { name: SPANGEN_CH_PASSWORD,  valueFrom: { secretKeyRef: { name: spangen-ch, key: password, optional: true } } }
+            - { name: SPANGEN_CH_ASYNC,          value: "true" }
+            - { name: SPANGEN_CH_WAIT_FOR_ASYNC, value: "true" }
+            - { name: SPANGEN_CH_BATCH_SIZE,     value: "5000" }
+            - { name: SPANGEN_CH_MAX_CONNS,      value: "16" }
+            # ----- OTLP (collector) — used when SPANGEN_SINK=otlp -----
+            - { name: SPANGEN_OTLP_ENDPOINT,    value: "otel-collector:4317" }
+            - { name: SPANGEN_OTLP_INSECURE,    value: "true" }
+            - { name: SPANGEN_OTLP_CONNECTIONS, value: "4" }
+            - { name: SPANGEN_OTLP_SPANS_PER_REQUEST, value: "2000" }
+            # ----- data shape -----
+            - { name: SPANGEN_SERVICES,  value: "30" }
+            - { name: SPANGEN_ERROR_RATE, value: "0.015" }
+          ports:
+            - { name: metrics, containerPort: 8888 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 3
+          resources:
+            requests: { cpu: "2",  memory: "512Mi" }
+            limits:   { cpu: "4",  memory: "1Gi" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spangen
+  labels: { app: spangen }
+spec:
+  selector: { app: spangen }
+  ports:
+    - { name: metrics, port: 8888, targetPort: metrics }
+---
+# Optional: Prometheus Operator scrape config for all 10 replicas.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spangen
+  labels: { app: spangen }
+spec:
+  selector:
+    matchLabels: { app: spangen }
+  endpoints:
+    - { port: metrics, interval: 5s, path: /metrics }

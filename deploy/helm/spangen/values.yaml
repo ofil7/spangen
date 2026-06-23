@@ -1,0 +1,114 @@
+# Default values for spangen. 10 replicas x 100k spans/s = ~1M spans/s.
+# Override with `-f my-values.yaml` or `--set key=value`.
+
+# Number of generator pods. 10 x rate = aggregate throughput.
+replicaCount: 10
+
+image:
+  repository: image-registry.openshift-image-registry.svc:5000/benchmark/spangen
+  tag: latest
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Which sink to drive: "clickhouse" (direct native) or "otlp" (to collectors).
+sink: clickhouse
+
+# ---- data shape + rate (maps to SPANGEN_* / generator flags) ----
+generator:
+  rate: 100000          # target spans/sec PER POD (<=0 = unbounded)
+  ramp: 30s             # linear ramp-up to target
+  duration: ""          # e.g. "10m"; empty = run until stopped
+  maxSpans: 0           # stop after N spans/pod (0 = unlimited)
+  workers: 0            # 0 = GOMAXPROCS
+  services: 30
+  spansPerTraceMin: 5
+  spansPerTraceMax: 20
+  errorRate: 0.015
+  eventRate: 0.10
+
+# ---- direct ClickHouse sink ----
+clickhouse:
+  endpoints: "ch-shard-0:9000,ch-shard-1:9000,ch-shard-2:9000"
+  mode: shard-roundrobin        # local | distributed | shard-roundrobin
+  database: otel
+  table: otel_traces_local      # use "otel_traces" with mode=distributed
+  username: default
+  # Provide ONE of: password (chart creates a Secret) or existingSecret.
+  password: ""
+  existingSecret: ""            # name of an existing Secret holding the password
+  passwordKey: password         # key within the Secret
+  tls: false
+  compression: lz4              # none | lz4 | zstd
+  batchSize: 5000
+  maxConns: 16
+  blockBuffer: 16
+  async: true                   # async_insert=1
+  waitForAsync: true            # wait_for_async_insert (1/0); false = probe ceiling
+  asyncMaxDataSize: 0           # async_insert_max_data_size bytes (0 = server default)
+  asyncBusyTimeoutMs: 0         # async_insert_busy_timeout_ms (0 = server default)
+  dialTimeout: 10s
+  sendTimeout: 30s
+
+# ---- OTLP/gRPC sink (used when sink=otlp) ----
+otlp:
+  endpoint: otel-collector:4317
+  insecure: true
+  headers: ""                   # "k1=v1,k2=v2"
+  gzip: false
+  spansPerRequest: 2000         # keep request < 4MB
+  connections: 4
+  timeout: 30s
+
+# ---- metrics ----
+metrics:
+  port: 8888
+
+service:
+  enabled: true
+  port: 8888
+
+# Prometheus Operator / OpenShift user-workload monitoring scrape config.
+serviceMonitor:
+  enabled: false
+  interval: 5s
+  scrapeTimeout: 4s
+  # Extra labels so your Prometheus selects it (e.g. release: prometheus-stack).
+  labels: {}
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 512Mi
+  limits:
+    cpu: "4"
+    memory: 1Gi
+
+# Spread the generator pods across nodes so the load test isn't bottlenecked on
+# one node. Set false to disable, or provide your own topologySpreadConstraints.
+spreadAcrossNodes: true
+topologySpreadConstraints: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+# Extra raw env entries appended verbatim (list of {name,value} or valueFrom).
+extraEnv: []
+
+# Pod-level securityContext. Defaults are OpenShift `restricted-v2` SCC friendly:
+# no fixed UID (the SCC assigns one), non-root, seccomp RuntimeDefault.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level securityContext.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL

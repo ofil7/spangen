@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spangen.fullname" . }}
+  labels:
+    {{- include "spangen.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "spangen.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spangen.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: spangen
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          env:
+            - name: SPANGEN_SINK
+              value: {{ .Values.sink | quote }}
+            - name: SPANGEN_METRICS_ADDR
+              value: {{ printf ":%v" .Values.metrics.port | quote }}
+            # ----- generator -----
+            - name: SPANGEN_RATE
+              value: {{ .Values.generator.rate | quote }}
+            - name: SPANGEN_RAMP
+              value: {{ .Values.generator.ramp | quote }}
+            {{- if .Values.generator.duration }}
+            - name: SPANGEN_DURATION
+              value: {{ .Values.generator.duration | quote }}
+            {{- end }}
+            - name: SPANGEN_MAX_SPANS
+              value: {{ .Values.generator.maxSpans | quote }}
+            - name: SPANGEN_WORKERS
+              value: {{ .Values.generator.workers | quote }}
+            - name: SPANGEN_SERVICES
+              value: {{ .Values.generator.services | quote }}
+            - name: SPANGEN_SPANS_PER_TRACE_MIN
+              value: {{ .Values.generator.spansPerTraceMin | quote }}
+            - name: SPANGEN_SPANS_PER_TRACE_MAX
+              value: {{ .Values.generator.spansPerTraceMax | quote }}
+            - name: SPANGEN_ERROR_RATE
+              value: {{ .Values.generator.errorRate | quote }}
+            - name: SPANGEN_EVENT_RATE
+              value: {{ .Values.generator.eventRate | quote }}
+            # ----- clickhouse sink -----
+            - name: SPANGEN_CH_ENDPOINTS
+              value: {{ .Values.clickhouse.endpoints | quote }}
+            - name: SPANGEN_CH_MODE
+              value: {{ .Values.clickhouse.mode | quote }}
+            - name: SPANGEN_CH_DATABASE
+              value: {{ .Values.clickhouse.database | quote }}
+            - name: SPANGEN_CH_TABLE
+              value: {{ .Values.clickhouse.table | quote }}
+            - name: SPANGEN_CH_USERNAME
+              value: {{ .Values.clickhouse.username | quote }}
+            {{- if or .Values.clickhouse.password .Values.clickhouse.existingSecret }}
+            - name: SPANGEN_CH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "spangen.chSecretName" . }}
+                  key: {{ .Values.clickhouse.passwordKey | quote }}
+            {{- end }}
+            - name: SPANGEN_CH_TLS
+              value: {{ .Values.clickhouse.tls | quote }}
+            - name: SPANGEN_CH_COMPRESSION
+              value: {{ .Values.clickhouse.compression | quote }}
+            - name: SPANGEN_CH_BATCH_SIZE
+              value: {{ .Values.clickhouse.batchSize | quote }}
+            - name: SPANGEN_CH_MAX_CONNS
+              value: {{ .Values.clickhouse.maxConns | quote }}
+            - name: SPANGEN_CH_BLOCK_BUFFER
+              value: {{ .Values.clickhouse.blockBuffer | quote }}
+            - name: SPANGEN_CH_ASYNC
+              value: {{ .Values.clickhouse.async | quote }}
+            - name: SPANGEN_CH_WAIT_FOR_ASYNC
+              value: {{ .Values.clickhouse.waitForAsync | quote }}
+            - name: SPANGEN_CH_ASYNC_MAX_DATA_SIZE
+              value: {{ .Values.clickhouse.asyncMaxDataSize | quote }}
+            - name: SPANGEN_CH_ASYNC_BUSY_TIMEOUT_MS
+              value: {{ .Values.clickhouse.asyncBusyTimeoutMs | quote }}
+            - name: SPANGEN_CH_DIAL_TIMEOUT
+              value: {{ .Values.clickhouse.dialTimeout | quote }}
+            - name: SPANGEN_CH_SEND_TIMEOUT
+              value: {{ .Values.clickhouse.sendTimeout | quote }}
+            # ----- otlp sink -----
+            - name: SPANGEN_OTLP_ENDPOINT
+              value: {{ .Values.otlp.endpoint | quote }}
+            - name: SPANGEN_OTLP_INSECURE
+              value: {{ .Values.otlp.insecure | quote }}
+            {{- if .Values.otlp.headers }}
+            - name: SPANGEN_OTLP_HEADERS
+              value: {{ .Values.otlp.headers | quote }}
+            {{- end }}
+            - name: SPANGEN_OTLP_GZIP
+              value: {{ .Values.otlp.gzip | quote }}
+            - name: SPANGEN_OTLP_SPANS_PER_REQUEST
+              value: {{ .Values.otlp.spansPerRequest | quote }}
+            - name: SPANGEN_OTLP_CONNECTIONS
+              value: {{ .Values.otlp.connections | quote }}
+            - name: SPANGEN_OTLP_TIMEOUT
+              value: {{ .Values.otlp.timeout | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if .Values.spreadAcrossNodes }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "spangen.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

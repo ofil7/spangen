@@ -1,0 +1,59 @@
+# Reference OpenTelemetry Collector config for the OTLP path:
+#   spangen --(OTLP/gRPC)--> collector --(clickhouse exporter)--> ClickHouse
+#
+# Pre-create the schema with deploy/ddl/*.sql and keep create_schema: false so
+# the exporter does not race to create tables (recommended for production/load).
+# Scale collectors horizontally (e.g. several replicas behind the Service that
+# spangen's SPANGEN_OTLP_ENDPOINT points at) to absorb ~1M spans/s.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+
+processors:
+  # Batch to amortize ClickHouse insert overhead. Tune to your span size so each
+  # flush is a healthy multi-thousand-row insert.
+  batch:
+    timeout: 5s
+    send_batch_size: 10000
+    send_batch_max_size: 20000
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: otel
+    # Match spangen's target so both paths land in the same table.
+    traces_table_name: otel_traces
+    create_schema: false
+    # For a sharded cluster, point at the Distributed table and set cluster_name.
+    # cluster_name: '{cluster}'
+    username: default
+    # password: ${env:CH_PASSWORD}
+    async_insert: true
+    compress: lz4
+    timeout: 30s
+    sending_queue:
+      enabled: true
+      num_consumers: 20
+      queue_size: 10000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888

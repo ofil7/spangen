@@ -1,0 +1,29 @@
+# Online build variant: resolves Go dependencies INSIDE the builder container
+# over the network (no local Go install and no pre-existing vendor/ needed).
+# Use this on a CONNECTED machine to produce the image; the resulting image is
+# self-contained and runs fine air-gapped. The air-gapped *build* path is the
+# default deploy/Dockerfile (which uses a vendored module tree).
+#
+#   docker build -f deploy/Dockerfile.online -t spangen:latest .
+#   docker save spangen:latest | gzip > spangen-image.tar.gz
+
+FROM golang:1.23 AS build
+WORKDIR /src
+
+# Resolve + cache modules first (better layer caching). go.sum is generated here
+# if it doesn't exist yet.
+COPY go.mod ./
+COPY go.sum* ./
+RUN go mod download || true
+
+COPY . .
+RUN go mod tidy
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/spangen ./cmd/spangen
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/spangen /usr/local/bin/spangen
+USER 65532:65532
+EXPOSE 8888
+ENTRYPOINT ["/usr/local/bin/spangen"]

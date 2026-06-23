@@ -1,0 +1,26 @@
+spangen deployed: {{ .Values.replicaCount }} replica(s), sink="{{ .Values.sink }}".
+
+Aggregate target rate ≈ {{ .Values.replicaCount }} x {{ .Values.generator.rate }} = {{ mul .Values.replicaCount (.Values.generator.rate | int) }} spans/sec.
+
+{{ if eq .Values.sink "clickhouse" -}}
+ClickHouse: mode={{ .Values.clickhouse.mode }} db={{ .Values.clickhouse.database }} table={{ .Values.clickhouse.table }}
+  endpoints: {{ .Values.clickhouse.endpoints }}
+  async_insert={{ .Values.clickhouse.async }} wait_for_async_insert={{ .Values.clickhouse.waitForAsync }}
+{{- else -}}
+OTLP collector endpoint: {{ .Values.otlp.endpoint }} (insecure={{ .Values.otlp.insecure }})
+{{- end }}
+
+Watch achieved throughput across all pods:
+  oc -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} -f --max-log-requests {{ .Values.replicaCount }} | grep status
+
+Port-forward one pod's metrics:
+  oc -n {{ .Release.Namespace }} port-forward svc/{{ include "spangen.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/metrics | grep spangen_achieved_rate
+
+{{ if not .Values.serviceMonitor.enabled -}}
+Tip: set serviceMonitor.enabled=true to scrape all pods with Prometheus.
+{{- end }}
+
+Reminder: the generator is INSERT-ONLY. Ensure the target table exists first
+(apply deploy/ddl/*.sql), and for the OTLP path keep the collector's
+traces_table_name + create_schema=false pointing at the same table.

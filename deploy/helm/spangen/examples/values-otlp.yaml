@@ -1,0 +1,16 @@
+# Drive the OTLP path: spangen -> collector(s) -> clickhouse exporter.
+# helm install bench ./spangen -f examples/values-otlp.yaml
+sink: otlp
+replicaCount: 10
+generator:
+  rate: 100000
+  ramp: 1m
+otlp:
+  endpoint: otel-collector.observability.svc:4317
+  insecure: true
+  connections: 6
+  spansPerRequest: 2000
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus

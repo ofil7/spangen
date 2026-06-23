@@ -1,0 +1,8 @@
+# Build artifacts
+/bin/
+/work/
+*.log
+
+# Go module vendor tree is intentionally NOT committed here (generate with
+# `make vendor` on a connected host). The prebuilt container image tar IS
+# committed so the repo ZIP is usable on an air-gapped network — do not ignore it.
