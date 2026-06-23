@@ -23,6 +23,16 @@ vet:
 image:
 	docker build -f deploy/Dockerfile -t $(IMAGE) .
 
+## image-online: build on a CONNECTED host without local Go or vendor/
+## (resolves deps inside the builder container). This is the normal build path.
+image-online:
+	docker build -f deploy/Dockerfile.online -t $(IMAGE) .
+
+## tar: rebuild the image and refresh the committed air-gap tar in one step
+tar: image-online
+	docker save $(IMAGE) | gzip > $(TAR).gz
+	@echo "refreshed $(TAR).gz — commit + push it, then re-download the repo ZIP"
+
 ## save: export the image to a tar for air-gapped transfer
 save:
 	docker save $(IMAGE) | gzip > $(TAR).gz

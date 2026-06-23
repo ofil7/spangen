@@ -69,18 +69,23 @@ helm install bench deploy/helm/spangen -n benchmark --create-namespace \
   --set image.repository=image-registry.internal/benchmark/spangen
 ```
 
-Want to rebuild from source instead? See below.
+Want to rebuild after a code change? See below.
 
-## Build & transfer (air-gapped workflow)
+## Rebuilding the image (connected host)
 
-On a **connected** build host (Go 1.23+, Docker):
+The air-gapped side only ever consumes the prebuilt image — **all building happens
+on a connected machine** (no Go install needed; deps resolve inside the builder
+container). After any code change, refresh the committed tar in one step:
 
 ```bash
 cd spangen
-make vendor        # resolves deps, writes go.sum + vendor/  (needs internet)
-make image         # builds spangen:latest fully offline from vendor/
-make save          # -> spangen-image.tar.gz
+make tar           # docker build (Dockerfile.online) + docker save -> spangen-image.tar.gz
+git commit -am "rebuild image" && git push    # then re-download the repo ZIP
 ```
+
+> Optional, only if you want fully reproducible offline rebuilds: run `make vendor`
+> on a connected host to commit `go.sum` + `vendor/`, then `make image` builds from
+> the default `deploy/Dockerfile` with zero network. Not required for the workflow above.
 
 Copy `spangen-image.tar.gz` to the air-gapped registry host and load it:
 
