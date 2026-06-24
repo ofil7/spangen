@@ -5,7 +5,7 @@
 # Two stages: a Go builder and a distroless static runtime (no shell, runs as a
 # non-root UID — OpenShift `restricted` SCC compatible).
 
-FROM golang:1.23 AS build
+FROM golang:1.24 AS build
 WORKDIR /src
 
 # Copy everything (including vendor/). .dockerignore keeps junk out.

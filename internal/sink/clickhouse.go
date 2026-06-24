@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -37,6 +38,7 @@ import (
 type chSink struct {
 	conns     []chConn
 	insertSQL string
+	jsonAttrs bool // schema=json: attributes are JSON columns, not Map; Duration is Int64
 	next      atomic.Uint64
 	sendTO    time.Duration
 }
@@ -111,7 +113,8 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 	}
 
 	s := &chSink{
-		insertSQL: buildInsertSQL(ch.Database, ch.Table),
+		insertSQL: buildInsertSQL(ch.Database, ch.Table, ch.Schema),
+		jsonAttrs: ch.Schema == "json",
 		sendTO:    ch.SendTimeout,
 	}
 
@@ -192,9 +195,10 @@ func (s *chSink) Send(ctx context.Context, td ptrace.Traces) error {
 			ss := sss.At(j)
 			scopeName := ss.Scope().Name()
 			scopeVer := ss.Scope().Version()
+			scopeAttrs := attrMap(ss.Scope().Attributes()) // only used by the json schema
 			spans := ss.Spans()
 			for k := 0; k < spans.Len(); k++ {
-				if err := appendSpan(batch, spans.At(k), resAttrs, svcName, scopeName, scopeVer); err != nil {
+				if err := s.appendSpan(batch, spans.At(k), resAttrs, scopeAttrs, svcName, scopeName, scopeVer); err != nil {
 					_ = batch.Abort()
 					return fmt.Errorf("append: %w", err)
 				}
@@ -273,9 +277,20 @@ func (h *httpBatch) Abort() error {
 	return h.tx.Rollback()
 }
 
-// appendSpan maps one pdata span to the exact column order of the OTel
-// clickhouseexporter otel_traces schema.
-func appendSpan(batch chBatch, sp ptrace.Span, resAttrs map[string]string, svcName, scopeName, scopeVer string) error {
+// appendSpan dispatches to the schema-specific row encoder. The two schemas
+// differ in attribute column type (Map vs JSON), Duration type (UInt64 vs
+// Int64), the presence of ScopeAttributes, and column order — so each has its
+// own Append whose argument order matches its buildInsertSQL column list.
+func (s *chSink) appendSpan(batch chBatch, sp ptrace.Span, resAttrs, scopeAttrs map[string]string, svcName, scopeName, scopeVer string) error {
+	if s.jsonAttrs {
+		return appendSpanJSON(batch, sp, resAttrs, scopeAttrs, svcName, scopeName, scopeVer)
+	}
+	return appendSpanMap(batch, sp, resAttrs, svcName, scopeName, scopeVer)
+}
+
+// appendSpanMap maps a span to the classic OTel clickhouseexporter schema
+// (Map(String,String) attributes, UInt64 Duration, Nested Events/Links).
+func appendSpanMap(batch chBatch, sp ptrace.Span, resAttrs map[string]string, svcName, scopeName, scopeVer string) error {
 	evTs, evNames, evAttrs := events(sp)
 	lkTraceIDs, lkSpanIDs, lkStates, lkAttrs := links(sp)
 
@@ -298,6 +313,50 @@ func appendSpan(batch chBatch, sp ptrace.Span, resAttrs map[string]string, svcNa
 		evTs, evNames, evAttrs,                        // Events.*
 		lkTraceIDs, lkSpanIDs, lkStates, lkAttrs,      // Links.*
 	)
+}
+
+// appendSpanJSON maps a span to the JSON-attribute schema: ResourceAttributes,
+// SpanAttributes and ScopeAttributes are JSON columns (sent as JSON-object
+// strings — string-serialization mode), Events.Attributes/Links.Attributes are
+// Array(JSON) (arrays of JSON strings), and Duration is Int64. Column order
+// matches buildInsertSQL's json branch.
+func appendSpanJSON(batch chBatch, sp ptrace.Span, resAttrs, scopeAttrs map[string]string, svcName, scopeName, scopeVer string) error {
+	evTs, evNames, evAttrs := eventsJSON(sp)
+	lkTraceIDs, lkSpanIDs, lkStates, lkAttrs := linksJSON(sp)
+
+	return batch.Append(
+		sp.StartTimestamp().AsTime(),                 // Timestamp
+		traceHex(sp.TraceID()),                       // TraceId
+		spanHex(sp.SpanID()),                         // SpanId
+		spanHex(sp.ParentSpanID()),                   // ParentSpanId
+		sp.TraceState().AsRaw(),                      // TraceState
+		sp.Name(),                                    // SpanName
+		sp.Kind().String(),                           // SpanKind
+		svcName,                                      // ServiceName
+		int64(sp.EndTimestamp()-sp.StartTimestamp()), // Duration (Int64 ns)
+		sp.Status().Code().String(),                  // StatusCode
+		sp.Status().Message(),                        // StatusMessage
+		jsonAttr(resAttrs),                           // ResourceAttributes (JSON)
+		jsonAttr(attrMap(sp.Attributes())),           // SpanAttributes (JSON)
+		jsonAttr(scopeAttrs),                         // ScopeAttributes (JSON)
+		scopeName,                                    // ScopeName
+		scopeVer,                                     // ScopeVersion
+		lkTraceIDs, lkSpanIDs, lkStates, lkAttrs,     // Links.*
+		evTs, evNames, evAttrs,                       // Events.*
+	)
+}
+
+// jsonAttr renders an attribute map as a compact JSON object string for a JSON
+// column in string-serialization mode. Empty maps become "{}".
+func jsonAttr(m map[string]string) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func events(sp ptrace.Span) (ts []time.Time, names []string, attrs []map[string]string) {
@@ -338,6 +397,47 @@ func links(sp ptrace.Span) (traceIDs, spanIDs, states []string, attrs []map[stri
 	return
 }
 
+// eventsJSON is events() for the json schema: Attributes is Array(JSON), so
+// each element is a JSON-object string instead of a map.
+func eventsJSON(sp ptrace.Span) (ts []time.Time, names, attrs []string) {
+	ev := sp.Events()
+	n := ev.Len()
+	if n == 0 {
+		return
+	}
+	ts = make([]time.Time, n)
+	names = make([]string, n)
+	attrs = make([]string, n)
+	for i := 0; i < n; i++ {
+		e := ev.At(i)
+		ts[i] = e.Timestamp().AsTime()
+		names[i] = e.Name()
+		attrs[i] = jsonAttr(attrMap(e.Attributes()))
+	}
+	return
+}
+
+// linksJSON is links() for the json schema: Attributes is Array(JSON).
+func linksJSON(sp ptrace.Span) (traceIDs, spanIDs, states, attrs []string) {
+	lk := sp.Links()
+	n := lk.Len()
+	if n == 0 {
+		return
+	}
+	traceIDs = make([]string, n)
+	spanIDs = make([]string, n)
+	states = make([]string, n)
+	attrs = make([]string, n)
+	for i := 0; i < n; i++ {
+		l := lk.At(i)
+		traceIDs[i] = traceHex(l.TraceID())
+		spanIDs[i] = spanHex(l.SpanID())
+		states[i] = l.TraceState().AsRaw()
+		attrs[i] = jsonAttr(attrMap(l.Attributes()))
+	}
+	return
+}
+
 func attrMap(m pcommon.Map) map[string]string {
 	out := make(map[string]string, m.Len())
 	m.Range(func(k string, v pcommon.Value) bool {
@@ -361,7 +461,19 @@ func spanHex(id pcommon.SpanID) string {
 	return hex.EncodeToString(id[:])
 }
 
-func buildInsertSQL(db, table string) string {
+func buildInsertSQL(db, table, schema string) string {
+	if schema == "json" {
+		// JSON-attribute schema: Duration is Int64, attributes are JSON columns,
+		// ScopeAttributes is present, Links precede Events. Column order here is
+		// the contract appendSpanJSON's Append must match.
+		return fmt.Sprintf("INSERT INTO `%s`.`%s` (\n"+`
+			Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind,
+			ServiceName, Duration, StatusCode, StatusMessage,
+			ResourceAttributes, SpanAttributes, ScopeAttributes, ScopeName, ScopeVersion,
+			Links.TraceId, Links.SpanId, Links.TraceState, Links.Attributes,
+			Events.Timestamp, Events.Name, Events.Attributes)`, db, table)
+	}
+	// Classic Map-attribute schema (matches appendSpanMap).
 	return fmt.Sprintf("INSERT INTO `%s`.`%s` (\n"+`
 		Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind,
 		ServiceName, ResourceAttributes, ScopeName, ScopeVersion, SpanAttributes,
@@ -372,6 +484,11 @@ func buildInsertSQL(db, table string) string {
 
 func buildSettings(ch config.CHConfig) clickhouse.Settings {
 	st := clickhouse.Settings{}
+	if ch.Schema == "json" {
+		// Insert JSON columns using string serialization (we Append JSON-object
+		// strings). Required for the native block writer to accept them.
+		st["output_format_native_write_json_as_string"] = 1
+	}
 	if ch.Async {
 		st["async_insert"] = 1
 		if ch.WaitForAsync {

@@ -39,6 +39,12 @@ schema** (exact columns/codecs/skip-indexes). DDL is in [`deploy/ddl`](deploy/dd
 | `otel_traces_single.sql` | one node, `MergeTree` | `-ch.mode=local -ch.table=otel_traces` |
 | `otel_traces_local.sql` | per-shard `ReplicatedMergeTree` (`ON CLUSTER`) | `-ch.mode=shard-roundrobin` or `local`, `-ch.table=otel_traces_local` |
 | `otel_traces_distributed.sql` | `Distributed` over the local tables | `-ch.mode=distributed -ch.table=otel_traces` |
+| `otel_traces_json_single.sql` | one node, `MergeTree`, **`JSON` attribute columns** | `-ch.schema=json -ch.mode=local -ch.table=otel_traces` |
+
+Two attribute schemas are supported via `-ch.schema` (`SPANGEN_CH_SCHEMA`):
+
+- **`map`** (default) — attributes are `Map(LowCardinality(String), String)`, `Duration` is `UInt64` (the classic `clickhouseexporter` schema; the first three DDL files above).
+- **`json`** — `ResourceAttributes`/`SpanAttributes`/`ScopeAttributes` are the native ClickHouse **`JSON`** type, `Duration` is `Int64` (the newer OTel/ClickStack-style schema). Requires **ClickHouse ≥ 25.6**. See [`ClickHouse JSON schema`](#clickhouse-attribute-schema-map-vs-json) below.
 
 The generator is **insert-only** — it never runs DDL. Apply the SQL yourself
 (or let the collector's exporter create it with `create_schema: true`, then set
@@ -138,6 +144,7 @@ Key ones (see [`internal/config`](internal/config/config.go) for all):
 | `SPANGEN_CH_ENDPOINTS` | `localhost:9000` | comma-separated `host:port` (native `:9000`, http `:8123`) |
 | `SPANGEN_CH_PROTOCOL` | `native` | `native` (TCP 9000) / `http` (8123) |
 | `SPANGEN_CH_MODE` | `local` | `local` / `distributed` / `shard-roundrobin` |
+| `SPANGEN_CH_SCHEMA` | `map` | `map` (Map attrs) / `json` (JSON attr cols, CH ≥ 25.6) |
 | `SPANGEN_CH_TABLE` | `otel_traces` | target table (see table above) |
 | `SPANGEN_CH_ASYNC` | `true` | `async_insert=1` |
 | `SPANGEN_CH_WAIT_FOR_ASYNC` | `true` | `wait_for_async_insert` (1/0) |
@@ -170,6 +177,35 @@ compression is available on HTTP; `lz4`/`zstd` work on both.
 ```bash
 # HTTP example
 SPANGEN_CH_PROTOCOL=http SPANGEN_CH_ENDPOINTS=clickhouse:8123 SPANGEN_CH_COMPRESSION=gzip ...
+```
+
+### ClickHouse attribute schema: map vs JSON
+
+`SPANGEN_CH_SCHEMA=map` (default) targets the classic `clickhouseexporter`
+schema where attributes are `Map(LowCardinality(String), String)` and `Duration`
+is `UInt64`.
+
+`SPANGEN_CH_SCHEMA=json` targets the newer OTel/ClickStack-style schema where
+`ResourceAttributes`, `SpanAttributes` and `ScopeAttributes` are the native
+ClickHouse **`JSON`** type, `Events.Attributes`/`Links.Attributes` are
+`Array(JSON)`, and `Duration` is `Int64`. spangen writes the JSON columns using
+**string serialization** (it sends each attribute set as a compact JSON object
+string and sets `output_format_native_write_json_as_string=1`), which the driver
+maps to the JSON type. This requires **ClickHouse ≥ 25.6** and
+**clickhouse-go ≥ v2.46** (both shipped in the image). The attributes are stored
+as real JSON, so they're queryable as subcolumns, e.g.:
+
+```sql
+SELECT SpanAttributes.`http.request.method`::String AS method, count()
+FROM otel.otel_traces GROUP BY method;
+```
+
+Pre-create the table with [`deploy/ddl/otel_traces_json_single.sql`](deploy/ddl/otel_traces_json_single.sql)
+(single node) or the `JSON`-column variant of your local/distributed tables, then
+run with `-ch.schema=json`. Both the native and HTTP protocols are supported.
+
+```bash
+SPANGEN_CH_SCHEMA=json SPANGEN_CH_TABLE=otel_traces ...
 ```
 
 ### `async_insert` (you asked to use it)

@@ -72,6 +72,8 @@ spec:
               value: {{ .Values.clickhouse.protocol | quote }}
             - name: SPANGEN_CH_MODE
               value: {{ .Values.clickhouse.mode | quote }}
+            - name: SPANGEN_CH_SCHEMA
+              value: {{ .Values.clickhouse.schema | quote }}
             - name: SPANGEN_CH_DATABASE
               value: {{ .Values.clickhouse.database | quote }}
             - name: SPANGEN_CH_TABLE

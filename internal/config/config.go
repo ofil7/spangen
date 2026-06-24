@@ -55,6 +55,7 @@ type CHConfig struct {
 	Table        string
 	Protocol     string // "native" (TCP 9000) | "http" (8123)
 	Mode         string // "local" | "distributed" | "shard-roundrobin"
+	Schema       string // "map" (classic Map(String,String) attrs) | "json" (JSON attrs + ScopeAttributes, Int64 Duration)
 	Username     string
 	Password     string
 	TLS          bool
@@ -114,6 +115,7 @@ func Parse() (*Config, error) {
 	flag.StringVar(&c.CH.Table, "ch.table", env("SPANGEN_CH_TABLE", "otel_traces"), "target table")
 	flag.StringVar(&c.CH.Protocol, "ch.protocol", env("SPANGEN_CH_PROTOCOL", "native"), "native|http (native=TCP 9000, http=8123)")
 	flag.StringVar(&c.CH.Mode, "ch.mode", env("SPANGEN_CH_MODE", "local"), "local|distributed|shard-roundrobin")
+	flag.StringVar(&c.CH.Schema, "ch.schema", env("SPANGEN_CH_SCHEMA", "map"), "attribute schema: map (Map(String,String)) | json (JSON cols + ScopeAttributes, Int64 Duration)")
 	flag.StringVar(&c.CH.Username, "ch.username", env("SPANGEN_CH_USERNAME", "default"), "username")
 	flag.StringVar(&c.CH.Password, "ch.password", env("SPANGEN_CH_PASSWORD", ""), "password")
 	flag.BoolVar(&c.CH.TLS, "ch.tls", envBool("SPANGEN_CH_TLS", false), "enable TLS to ClickHouse")
@@ -166,6 +168,11 @@ func (c *Config) validate() error {
 		case "local", "distributed", "shard-roundrobin":
 		default:
 			return fmt.Errorf("invalid -ch.mode %q", c.CH.Mode)
+		}
+		switch c.CH.Schema {
+		case "map", "json":
+		default:
+			return fmt.Errorf("invalid -ch.schema %q (want map|json)", c.CH.Schema)
 		}
 		if len(c.CH.Endpoints) == 0 {
 			return fmt.Errorf("-ch.endpoints is empty")

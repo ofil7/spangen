@@ -7,7 +7,7 @@
 #   docker build -f deploy/Dockerfile.online -t spangen:latest .
 #   docker save spangen:latest | gzip > spangen-image.tar.gz
 
-FROM golang:1.23 AS build
+FROM golang:1.24 AS build
 WORKDIR /src
 
 # Resolve + cache modules first (better layer caching). go.sum is generated here
