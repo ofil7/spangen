@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -90,8 +92,14 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 	pingCtx, cancel := context.WithTimeout(context.Background(), ch.DialTimeout)
 	defer cancel()
 	if err := s.conns[0].Ping(pingCtx); err != nil {
-		return nil, fmt.Errorf("clickhouse ping: %w", err)
+		hint := ""
+		if strings.Contains(err.Error(), "unexpected packet [72]") {
+			hint = " — got an HTTP response on a native connection: you are using -ch.protocol=native against an HTTP port. Use -ch.protocol=http with port 8123, or point at the native port 9000"
+		}
+		return nil, fmt.Errorf("clickhouse ping (protocol=%s endpoints=%v): %w%s", ch.Protocol, ch.Endpoints, err, hint)
 	}
+	log.Printf("clickhouse connected: protocol=%s mode=%s endpoints=%v db=%s table=%s",
+		ch.Protocol, ch.Mode, ch.Endpoints, ch.Database, ch.Table)
 	return s, nil
 }
 

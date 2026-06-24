@@ -92,8 +92,8 @@ func (e *Engine) Run(ctx context.Context) {
 	go e.sampleRate(runCtx)
 	go e.logStatus(runCtx)
 
-	log.Printf("spangen started: sink=%s mode=%s workers=%d batch=%d target=%.0f spans/s replica=%d",
-		e.snk.Name(), e.cfg.CH.Mode, workers, e.batch, e.cfg.Gen.Rate, e.cfg.ReplicaIndex)
+	log.Printf("spangen started: sink=%s ch-protocol=%s mode=%s workers=%d batch=%d target=%.0f spans/s replica=%d",
+		e.snk.Name(), e.cfg.CH.Protocol, e.cfg.CH.Mode, workers, e.batch, e.cfg.Gen.Rate, e.cfg.ReplicaIndex)
 
 	wg.Wait()
 	log.Printf("spangen stopped: generated=%d sent=%d errors=%d", e.generated.Load(), e.sent.Load(), e.errors.Load())
