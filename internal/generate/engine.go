@@ -140,10 +140,19 @@ func (e *Engine) send(ctx context.Context, td ptrace.Traces, n int) {
 	e.met.Inflight.Inc()
 	defer e.met.Inflight.Dec()
 
+	// Detach the actual insert from the run context: once a batch has been
+	// accepted for sending it must be allowed to finish flushing, even while the
+	// run is shutting down (duration/​max-spans/​signal cancel). The sink still
+	// bounds each attempt with its own send timeout, so this can't hang. Without
+	// this, an abrupt cancel aborts in-flight inserts client-side — and some of
+	// those have already committed server-side, so they'd be miscounted as errors
+	// (sent < rows actually in ClickHouse).
+	sendCtx := context.WithoutCancel(ctx)
+
 	var err error
 	for attempt := 0; attempt < sendAttempts; attempt++ {
 		t0 := time.Now()
-		err = e.snk.Send(ctx, td)
+		err = e.snk.Send(sendCtx, td)
 		e.met.SendDuration.Observe(time.Since(t0).Seconds())
 		if err == nil {
 			e.met.BatchesOK.Inc()

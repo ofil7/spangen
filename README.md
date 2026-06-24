@@ -155,10 +155,17 @@ Key ones (see [`internal/config`](internal/config/config.go) for all):
 `:9000` (`:9440` TLS) — lowest overhead, best for max ingest. Set
 `SPANGEN_CH_PROTOCOL=http` to insert over the **HTTP interface** on `:8123`
 (`:8443` TLS) — useful when only the HTTP port is exposed (ingress/LB/proxy) or
-when you want to benchmark that path. The same batch `INSERT` (`Map`/`Nested`
-columns, `async_insert`, all three topology modes) works over both; just point
-`SPANGEN_CH_ENDPOINTS` at the matching port. `gzip` compression is available on
-HTTP; `lz4`/`zstd` work on both.
+when you want to benchmark that path. The identical 22-column batch `INSERT`
+(`Map`/`Nested` columns, `async_insert`, all three topology modes) lands the same
+rows over both; just point `SPANGEN_CH_ENDPOINTS` at the matching port. `gzip`
+compression is available on HTTP; `lz4`/`zstd` work on both.
+
+> **Why two code paths:** clickhouse-go's `Open()` (native `driver.Conn`) ignores
+> the `Protocol` option and always speaks the native TCP protocol — pointing it at
+> `:8123` yields a `unexpected packet [72]` handshake error. The HTTP protocol is
+> only reachable through the `database/sql` interface (`OpenDB()` +
+> `Begin`/`Prepare`/`Exec`/`Commit`), so the sink switches API by protocol. Both
+> have been verified end-to-end to land identical rows (Map + Nested included).
 
 ```bash
 # HTTP example
@@ -211,8 +218,9 @@ It also logs a status line every 5s for operators without Prometheus.
 
 ## SDK notes / known issues handled
 
-- **clickhouse-go/v2**: native batch API (required for `Map`/`Nested`);
-  `async_insert` via settings; single compression codec (no double-compress).
+- **clickhouse-go/v2**: native batch API over `Open()` for the native protocol,
+  and the `database/sql` batch (`OpenDB()` + `Tx`) for HTTP — `Open()` can't speak
+  HTTP. `async_insert` via settings; single compression codec (no double-compress).
 - **OTLP/gRPC** (`collector/pdata` + `ptraceotlp`): spans are built as pdata and
   exported directly — **bypassing the SDK BatchSpanProcessor**, so no SDK
   queue-drop. The gRPC **4MB** message limit is handled by bounding

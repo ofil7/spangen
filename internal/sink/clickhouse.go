@@ -3,6 +3,7 @@ package sink
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -18,14 +19,42 @@ import (
 	"spangen/internal/config"
 )
 
-// chSink writes spans directly to ClickHouse over the native protocol using the
-// batch API (required for the Map and Nested columns). async_insert is enabled
-// via connection settings, NOT the inline WithAsync path.
+// chSink writes spans directly to ClickHouse using the batch API (required for
+// the Map and Nested columns). async_insert is enabled via connection settings,
+// NOT the inline WithAsync path.
+//
+// Two protocols are supported and use DIFFERENT client APIs, because
+// clickhouse-go only speaks HTTP through its database/sql interface:
+//
+//   - native (TCP 9000): clickhouse.Open() -> driver.Conn, PrepareBatch/Append/Send.
+//   - http   (8123):     clickhouse.OpenDB() -> *sql.DB, Begin/Prepare/Exec/Commit.
+//
+// clickhouse.Open() ignores Options.Protocol and always dials native, so the
+// HTTP path MUST go through OpenDB — otherwise a native handshake is attempted
+// against the HTTP port (server replies with HTTP, producing the classic
+// "unexpected packet [72]" handshake error). Both APIs carry the identical
+// 22-column INSERT (Map/Nested), Settings, and Compression.
 type chSink struct {
-	conns     []driver.Conn
+	conns     []chConn
 	insertSQL string
 	next      atomic.Uint64
 	sendTO    time.Duration
+}
+
+// chConn abstracts a single pooled connection over either protocol. newBatch
+// starts one insert batch; the span-mapping in Send is shared across both.
+type chConn interface {
+	Ping(ctx context.Context) error
+	Close() error
+	newBatch(ctx context.Context, insertSQL string) (chBatch, error)
+}
+
+// chBatch is one in-progress insert. Append adds a row (column order per
+// buildInsertSQL); Send commits; Abort discards on error.
+type chBatch interface {
+	Append(args ...any) error
+	Send() error
+	Abort() error
 }
 
 // NewClickHouse builds the sink according to cfg.CH.Mode:
@@ -61,6 +90,26 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 		return opt
 	}
 
+	// openOne builds one connection over the configured protocol. native returns
+	// an error eagerly from Open(); http (OpenDB) defers errors to Ping.
+	openOne := func(addrs []string) (chConn, error) {
+		opt := mkOpts(addrs)
+		if chProtocol(ch.Protocol) == clickhouse.HTTP {
+			// OpenDB rejects pool sizing in Options — it must be set on the
+			// *sql.DB instead. Zero them here and apply via Set*Conns below.
+			opt.MaxOpenConns, opt.MaxIdleConns = 0, 0
+			db := clickhouse.OpenDB(opt)
+			db.SetMaxOpenConns(clampMin1(ch.MaxOpenConns))
+			db.SetMaxIdleConns(clampMin1(ch.MaxOpenConns))
+			return &httpConn{db: db}, nil
+		}
+		conn, err := clickhouse.Open(opt)
+		if err != nil {
+			return nil, err
+		}
+		return &nativeConn{conn: conn}, nil
+	}
+
 	s := &chSink{
 		insertSQL: buildInsertSQL(ch.Database, ch.Table),
 		sendTO:    ch.SendTimeout,
@@ -69,11 +118,11 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 	switch ch.Mode {
 	case "shard-roundrobin":
 		for _, ep := range ch.Endpoints {
-			conn, err := clickhouse.Open(mkOpts([]string{ep}))
+			c, err := openOne([]string{ep})
 			if err != nil {
 				return nil, fmt.Errorf("open clickhouse %s: %w", ep, err)
 			}
-			s.conns = append(s.conns, conn)
+			s.conns = append(s.conns, c)
 		}
 		// Offset the starting shard by replica index so the 10 replicas don't all
 		// hammer shard 0 first.
@@ -81,11 +130,11 @@ func NewClickHouse(cfg *config.Config, replicaIndex int) (Sink, error) {
 			s.next.Store(uint64(replicaIndex % len(s.conns)))
 		}
 	default: // local, distributed
-		conn, err := clickhouse.Open(mkOpts(ch.Endpoints))
+		c, err := openOne(ch.Endpoints)
 		if err != nil {
 			return nil, fmt.Errorf("open clickhouse: %w", err)
 		}
-		s.conns = []driver.Conn{conn}
+		s.conns = []chConn{c}
 	}
 
 	// Fail fast if the cluster is unreachable / table is missing.
@@ -115,7 +164,7 @@ func (s *chSink) Close() error {
 	return first
 }
 
-func (s *chSink) pick() driver.Conn {
+func (s *chSink) pick() chConn {
 	if len(s.conns) == 1 {
 		return s.conns[0]
 	}
@@ -128,7 +177,7 @@ func (s *chSink) Send(ctx context.Context, td ptrace.Traces) error {
 	defer cancel()
 
 	conn := s.pick()
-	batch, err := conn.PrepareBatch(ctx, s.insertSQL, driver.WithReleaseConnection())
+	batch, err := conn.newBatch(ctx, s.insertSQL)
 	if err != nil {
 		return fmt.Errorf("prepare batch: %w", err)
 	}
@@ -159,30 +208,95 @@ func (s *chSink) Send(ctx context.Context, td ptrace.Traces) error {
 	return nil
 }
 
+// --- native protocol (clickhouse.Open / driver.Conn) ---
+
+type nativeConn struct{ conn driver.Conn }
+
+func (c *nativeConn) Ping(ctx context.Context) error { return c.conn.Ping(ctx) }
+func (c *nativeConn) Close() error                   { return c.conn.Close() }
+
+func (c *nativeConn) newBatch(ctx context.Context, insertSQL string) (chBatch, error) {
+	b, err := c.conn.PrepareBatch(ctx, insertSQL, driver.WithReleaseConnection())
+	if err != nil {
+		return nil, err
+	}
+	return nativeBatch{b: b}, nil
+}
+
+type nativeBatch struct{ b driver.Batch }
+
+func (n nativeBatch) Append(args ...any) error { return n.b.Append(args...) }
+func (n nativeBatch) Send() error              { return n.b.Send() }
+func (n nativeBatch) Abort() error             { return n.b.Abort() }
+
+// --- http protocol (clickhouse.OpenDB / database/sql) ---
+
+type httpConn struct{ db *sql.DB }
+
+func (c *httpConn) Ping(ctx context.Context) error { return c.db.PingContext(ctx) }
+func (c *httpConn) Close() error                   { return c.db.Close() }
+
+func (c *httpConn) newBatch(ctx context.Context, insertSQL string) (chBatch, error) {
+	// clickhouse-go's std driver batches rows on a Tx: Begin -> Prepare(INSERT)
+	// -> Exec per row -> Commit. This works over HTTP and carries Map/Nested
+	// columns identically to the native batch.
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	stmt, err := tx.PrepareContext(ctx, insertSQL)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return &httpBatch{ctx: ctx, tx: tx, stmt: stmt}, nil
+}
+
+type httpBatch struct {
+	ctx  context.Context
+	tx   *sql.Tx
+	stmt *sql.Stmt
+}
+
+func (h *httpBatch) Append(args ...any) error {
+	_, err := h.stmt.ExecContext(h.ctx, args...)
+	return err
+}
+
+func (h *httpBatch) Send() error {
+	defer h.stmt.Close()
+	return h.tx.Commit()
+}
+
+func (h *httpBatch) Abort() error {
+	defer h.stmt.Close()
+	return h.tx.Rollback()
+}
+
 // appendSpan maps one pdata span to the exact column order of the OTel
 // clickhouseexporter otel_traces schema.
-func appendSpan(batch driver.Batch, sp ptrace.Span, resAttrs map[string]string, svcName, scopeName, scopeVer string) error {
+func appendSpan(batch chBatch, sp ptrace.Span, resAttrs map[string]string, svcName, scopeName, scopeVer string) error {
 	evTs, evNames, evAttrs := events(sp)
 	lkTraceIDs, lkSpanIDs, lkStates, lkAttrs := links(sp)
 
 	return batch.Append(
-		sp.StartTimestamp().AsTime(),                                  // Timestamp
-		traceHex(sp.TraceID()),                                        // TraceId
-		spanHex(sp.SpanID()),                                          // SpanId
-		spanHex(sp.ParentSpanID()),                                    // ParentSpanId
-		sp.TraceState().AsRaw(),                                       // TraceState
-		sp.Name(),                                                     // SpanName
-		sp.Kind().String(),                                            // SpanKind
-		svcName,                                                       // ServiceName
-		resAttrs,                                                      // ResourceAttributes
-		scopeName,                                                     // ScopeName
-		scopeVer,                                                      // ScopeVersion
-		attrMap(sp.Attributes()),                                      // SpanAttributes
-		uint64(sp.EndTimestamp()-sp.StartTimestamp()),                 // Duration (ns)
-		sp.Status().Code().String(),                                  // StatusCode
-		sp.Status().Message(),                                         // StatusMessage
-		evTs, evNames, evAttrs,                                        // Events.*
-		lkTraceIDs, lkSpanIDs, lkStates, lkAttrs,                      // Links.*
+		sp.StartTimestamp().AsTime(),                  // Timestamp
+		traceHex(sp.TraceID()),                        // TraceId
+		spanHex(sp.SpanID()),                          // SpanId
+		spanHex(sp.ParentSpanID()),                    // ParentSpanId
+		sp.TraceState().AsRaw(),                       // TraceState
+		sp.Name(),                                     // SpanName
+		sp.Kind().String(),                            // SpanKind
+		svcName,                                       // ServiceName
+		resAttrs,                                      // ResourceAttributes
+		scopeName,                                     // ScopeName
+		scopeVer,                                      // ScopeVersion
+		attrMap(sp.Attributes()),                      // SpanAttributes
+		uint64(sp.EndTimestamp()-sp.StartTimestamp()), // Duration (ns)
+		sp.Status().Code().String(),                   // StatusCode
+		sp.Status().Message(),                         // StatusMessage
+		evTs, evNames, evAttrs,                        // Events.*
+		lkTraceIDs, lkSpanIDs, lkStates, lkAttrs,      // Links.*
 	)
 }
 
@@ -302,6 +416,13 @@ func clampU8(n int) int {
 	}
 	if n > 255 {
 		return 255
+	}
+	return n
+}
+
+func clampMin1(n int) int {
+	if n < 1 {
+		return 1
 	}
 	return n
 }
